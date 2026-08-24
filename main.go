@@ -27,14 +27,25 @@ func main() {
 
 }
 
-func fill_matriz(mAltura int, mLargura int) [][]int {
+func fill_matriz(mAltura int, mLargura int, qtdItens int) [][]int {
 
 	matriz := make([][]int, mAltura)
+	var total_itens int = 0
 
 	for i := 0; i < mAltura; i++ {
 		matriz[i] = make([]int, mLargura)
 		for j := 0; j < mLargura; j++ {
-			matriz[i][j] = rand.Intn(2)
+
+			if total_itens != qtdItens {
+				matriz[i][j] = rand.Intn(2)
+
+				if matriz[i][j] == 1 {
+					total_itens++
+				}
+
+			} else {
+				matriz[i][j] = 0
+			}
 		}
 	}
 
@@ -46,7 +57,7 @@ func create_swarm(matriz [][]int, numAgentes int,
 
 	formigas := make([]Formiga, numAgentes)
 
-	for i := 0; i < numAgentes; i++ {
+	for i := range numAgentes {
 
 		x := rand.Intn(mAltura)
 		y := rand.Intn(mLargura)
@@ -68,11 +79,37 @@ func create_swarm(matriz [][]int, numAgentes int,
 func simulate_ant_clustering(mAltura int, mLargura int, numAgentes int,
 	raio int, qtdItens int, iteracoes int) {
 
-	matriz := fill_matriz(mAltura, mLargura)
+	matriz := fill_matriz(mAltura, mLargura, qtdItens)
 
 	formigas := create_swarm(matriz, numAgentes, mAltura, mLargura)
 
 	for i := 0; i < iteracoes; i++ {
+
+		for j := 0; j < numAgentes; j++ {
+
+			x_atual := formigas[j].xAtual
+			y_atual := formigas[j].yAtual
+
+			//desse jeito tem que começar andando, se não nunca vai ser 0 na celula atual
+			//já que preencho com 8 (formiga)
+			if formigas[j].isBusy {
+				//dropa ou nao dropa?
+				if matriz[x_atual][y_atual] == 0 {
+					//n tem item
+				} else {
+					// tem item
+				}
+
+			} else {
+				//pega ou nao pega?
+				if matriz[x_atual][y_atual] == 0 {
+					// nao tem item
+				} else {
+					// tem item
+				}
+			}
+
+		}
 
 	}
 
