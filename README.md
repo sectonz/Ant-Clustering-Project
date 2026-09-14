@@ -1,4 +1,4 @@
-# Relatório Técnico — Ant Clustering com Dados Reais e Paralelização
+# Ant Clustering Paralelo com Dados
 
 ## 1. Visão Geral
 
