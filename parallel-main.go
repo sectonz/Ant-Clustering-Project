@@ -11,10 +11,12 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const caminho_resultados = "resultados/"
-const caminho_dataset = "dataset/4.txt"
+const caminho_dataset = "dataset/15.txt"
 const alpha = 0.5
 const k1 = 0.1
 const k2 = 0.15
@@ -62,7 +64,7 @@ func main() {
 	var (
 		mAltura    = 50
 		mLargura   = 50
-		numAgentes = 15
+		numAgentes = 20
 		raio       = 4
 		iteracoes  = 2500000
 	)
@@ -228,6 +230,7 @@ func distancia_euclidiana(a, b []float64) float64 {
 
 func calc_f(
 	matriz [][]*Dado,
+	cellMutex [][]sync.RWMutex,
 	dado *Dado,
 	x int,
 	y int,
@@ -250,7 +253,10 @@ func calc_f(
 			nx := (x + dx + mAltura) % mAltura
 			ny := (y + dy + mLargura) % mLargura
 
+			cellMutex[nx][ny].RLock()
 			vizinho := matriz[nx][ny]
+			cellMutex[nx][ny].RUnlock()
+
 			if vizinho != nil {
 				d := distancia_euclidiana(dado.atributos, vizinho.atributos)
 				soma += 1.0 - (d / alpha)
@@ -278,32 +284,40 @@ func prob_largar(f float64) float64 {
 	return termo * termo
 }
 
-// move cima/baixo/direita/esquerda, com movimento toroidal e checagem de colisao
+// move cima/baixo/direita/esquerda, com movimento toroidal e checagem de colisao thread-safe
 func move_Formiga(
-	x int,
-	y int,
+	f *Formiga,
 	mAltura int,
 	mLargura int,
 	ocupada [][]bool,
-) (int, int) {
+	ocupadaMutex *sync.Mutex,
+	r *rand.Rand,
+) {
 
 	direcoes := [4][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
-	perm := rand.Perm(4)
+	var perm [4]int
+	perm[0], perm[1], perm[2], perm[3] = 0, 1, 2, 3
+	for k := 3; k > 0; k-- {
+		idx := r.Intn(k + 1)
+		perm[k], perm[idx] = perm[idx], perm[k]
+	}
 
 	for _, idx := range perm {
 		d := direcoes[idx]
-		nx := (x + d[0] + mAltura) % mAltura
-		ny := (y + d[1] + mLargura) % mLargura
+		nx := (f.xAtual + d[0] + mAltura) % mAltura
+		ny := (f.yAtual + d[1] + mLargura) % mLargura
 
+		ocupadaMutex.Lock()
 		if !ocupada[nx][ny] {
-			ocupada[x][y] = false
+			ocupada[f.xAtual][f.yAtual] = false
 			ocupada[nx][ny] = true
-			return nx, ny
+			ocupadaMutex.Unlock()
+			f.xAtual = nx
+			f.yAtual = ny
+			return
 		}
+		ocupadaMutex.Unlock()
 	}
-
-	// permanece no lugar se todas as posicoes vizinhas estiverem ocupadas
-	return x, y
 }
 
 func save_matrix(
@@ -343,6 +357,7 @@ func gerar_grafico(
 	raio int,
 	fase string,
 	nomeBase string,
+	plotWg *sync.WaitGroup,
 ) {
 	var items []ItemPlot
 	for r := 0; r < mAltura; r++ {
@@ -381,26 +396,31 @@ func gerar_grafico(
 		Ants:             ants,
 	}
 
-	jsonData, err := json.Marshal(plotData)
-	if err != nil {
-		log.Fatalf("erro ao serializar json do plot: %v", err)
-	}
+	plotWg.Add(1)
+	go func() {
+		defer plotWg.Done()
 
-	jsonPath := caminho_resultados + nomeBase + ".json"
-	pngPath := caminho_resultados + nomeBase + ".png"
+		jsonData, err := json.Marshal(plotData)
+		if err != nil {
+			log.Fatalf("erro ao serializar json do plot: %v", err)
+		}
 
-	err = os.WriteFile(jsonPath, jsonData, 0644)
-	if err != nil {
-		log.Fatalf("erro ao salvar arquivo json: %v", err)
-	}
+		jsonPath := caminho_resultados + nomeBase + ".json"
+		pngPath := caminho_resultados + nomeBase + ".png"
 
-	cmd := exec.Command("python3", "plot.py", jsonPath, pngPath)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("erro ao executar plot.py: %v, saida: %s", err, string(out))
-	} else {
-		os.Remove(jsonPath)
-	}
+		err = os.WriteFile(jsonPath, jsonData, 0644)
+		if err != nil {
+			log.Fatalf("erro ao salvar arquivo json: %v", err)
+		}
+
+		cmd := exec.Command("python3", "plot.py", jsonPath, pngPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("erro ao executar plot.py: %v, saida: %s", err, string(out))
+		} else {
+			os.Remove(jsonPath)
+		}
+	}()
 }
 
 func simulate_ant_clustering(
@@ -417,69 +437,114 @@ func simulate_ant_clustering(
 
 	matriz := fill_matriz(mAltura, mLargura, dados)
 
+	cellMutex := make([][]sync.RWMutex, mAltura)
 	ocupada := make([][]bool, mAltura)
 	for i := range ocupada {
 		ocupada[i] = make([]bool, mLargura)
+		cellMutex[i] = make([]sync.RWMutex, mLargura)
 	}
+
+	var ocupadaMutex sync.Mutex
 
 	formigas := create_swarm(numAgentes, mAltura, mLargura, ocupada)
 
+	var plotWg sync.WaitGroup
+
 	save_matrix(caminho_resultados+"inicio.txt", matriz)
-	gerar_grafico(matriz, formigas, mAltura, mLargura, numItems, iteracoes, 0, raio, "Início", "inicio")
+	gerar_grafico(matriz, formigas, mAltura, mLargura, numItems, iteracoes, 0, raio, "Início", "inicio", &plotWg)
 
-	for i := 0; i < iteracoes; i++ {
+	const batchSize = 1000
 
-		for j := 0; j < numAgentes; j++ {
-
-			x_atual := formigas[j].xAtual
-			y_atual := formigas[j].yAtual
-
-			if formigas[j].isBusy {
-				// dropa ou nao dropa?
-				if matriz[x_atual][y_atual] == nil {
-					// nao tem item, pode dropar
-					f := calc_f(matriz, formigas[j].dadoCarregado, x_atual, y_atual, raio)
-					pd := prob_largar(f)
-
-					if rand.Float64() < pd {
-						matriz[x_atual][y_atual] = formigas[j].dadoCarregado
-						formigas[j].dadoCarregado = nil
-						formigas[j].isBusy = false
-					}
-				} else {
-					// tem item, formiga nao empilha, continua carregando
-				}
-
-			} else {
-				// pega ou nao pega?
-				if matriz[x_atual][y_atual] == nil {
-					// nao tem item, nada para pegar
-				} else {
-					// tem item, pode pegar
-					dado := matriz[x_atual][y_atual]
-					f := calc_f(matriz, dado, x_atual, y_atual, raio)
-					pp := prob_pegar(f)
-
-					if rand.Float64() < pp {
-						formigas[j].dadoCarregado = dado
-						matriz[x_atual][y_atual] = nil
-						formigas[j].isBusy = true
-					}
-				}
+	executarPassos := func(passos int) {
+		for p := 0; p < passos; p += batchSize {
+			atualBatch := batchSize
+			if p+atualBatch > passos {
+				atualBatch = passos - p
 			}
 
-			formigas[j].xAtual, formigas[j].yAtual = move_Formiga(x_atual, y_atual, mAltura, mLargura, ocupada)
+			var wg sync.WaitGroup
+			wg.Add(numAgentes)
 
+			for j := 0; j < numAgentes; j++ {
+				go func(antID int) {
+					defer wg.Done()
+					r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(antID)*1000 + int64(p)))
+
+					for step := 0; step < atualBatch; step++ {
+						x_atual := formigas[antID].xAtual
+						y_atual := formigas[antID].yAtual
+
+						if formigas[antID].isBusy {
+							// dropa ou nao dropa?
+							cellMutex[x_atual][y_atual].RLock()
+							vazio := (matriz[x_atual][y_atual] == nil)
+							cellMutex[x_atual][y_atual].RUnlock()
+
+							if vazio {
+								// nao tem item, pode dropar
+								f := calc_f(matriz, cellMutex, formigas[antID].dadoCarregado, x_atual, y_atual, raio)
+								pd := prob_largar(f)
+
+								if r.Float64() < pd {
+									cellMutex[x_atual][y_atual].Lock()
+									if matriz[x_atual][y_atual] == nil {
+										matriz[x_atual][y_atual] = formigas[antID].dadoCarregado
+										formigas[antID].dadoCarregado = nil
+										formigas[antID].isBusy = false
+									}
+									cellMutex[x_atual][y_atual].Unlock()
+								}
+							} else {
+								// tem item, formiga nao empilha, continua carregando
+							}
+
+						} else {
+							// pega ou nao pega?
+							cellMutex[x_atual][y_atual].RLock()
+							dado := matriz[x_atual][y_atual]
+							cellMutex[x_atual][y_atual].RUnlock()
+
+							if dado == nil {
+								// nao tem item, nada para pegar
+							} else {
+								// tem item, pode pegar
+								f := calc_f(matriz, cellMutex, dado, x_atual, y_atual, raio)
+								pp := prob_pegar(f)
+
+								if r.Float64() < pp {
+									cellMutex[x_atual][y_atual].Lock()
+									if matriz[x_atual][y_atual] == dado {
+										formigas[antID].dadoCarregado = dado
+										matriz[x_atual][y_atual] = nil
+										formigas[antID].isBusy = true
+									}
+									cellMutex[x_atual][y_atual].Unlock()
+								}
+							}
+						}
+
+						move_Formiga(&formigas[antID], mAltura, mLargura, ocupada, &ocupadaMutex, r)
+
+					}
+				}(j)
+			}
+
+			wg.Wait()
 		}
-
-		if i == iteracoes/2 {
-			save_matrix(caminho_resultados+"meio.txt", matriz)
-			gerar_grafico(matriz, formigas, mAltura, mLargura, numItems, iteracoes, i, raio, "Meio", "meio")
-		}
-
 	}
 
-	save_matrix(caminho_resultados+"final.txt", matriz)
-	gerar_grafico(matriz, formigas, mAltura, mLargura, numItems, iteracoes, iteracoes, raio, "Final", "final")
+	metade := iteracoes / 2
 
+	// Fase 1: do inicio ao meio
+	executarPassos(metade)
+	save_matrix(caminho_resultados+"meio.txt", matriz)
+	gerar_grafico(matriz, formigas, mAltura, mLargura, numItems, iteracoes, metade, raio, "Meio", "meio", &plotWg)
+
+	// Fase 2: do meio ao fim
+	executarPassos(iteracoes - metade)
+	save_matrix(caminho_resultados+"final.txt", matriz)
+	gerar_grafico(matriz, formigas, mAltura, mLargura, numItems, iteracoes, iteracoes, raio, "Final", "final", &plotWg)
+
+	// Aguarda a geracao dos graficos em background terminarem
+	plotWg.Wait()
 }
